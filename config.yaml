@@ -25,3 +25,20 @@ drift:
   magnitudes: [1.0, 2.0, 3.0]   # shift in training standard deviations
   onset_frac: 0.25              # onset at 25% into the post-drift segment
   gradual_width: 120            # rows for the gradual ramp from 0 to m
+
+autoencoder:
+  hidden: [64, 32]        # n -> 64 -> 32 -> 64 -> n (proposal Table 5.1)
+  lr: 0.001               # Adam
+  batch_size: 64
+  epochs: 30
+
+alarm:                    # shared by the autoencoder and entropy detectors
+  method: std             # std: mean + k*std of calibration scores | quantile: empirical quantile
+  k: 3.0
+  quantile: 0.99
+  confirm: 3              # consecutive rows above threshold before an alarm (c)
+
+fedcond_test:
+  queue_size: 20
+  alpha: 0.05
+  batch_rows: 30          # B new rows per round
