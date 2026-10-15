@@ -1,0 +1,27 @@
+seed: 42
+
+data:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  max_col_missing: 0.20   # drop feature columns missing in more than 20% of all rows (pooled over users)
+  max_row_missing: 0.30   # drop rows missing more than 30% of the kept features
+  min_label_users: 30     # keep labels that are positive for at least this many users
+  pre_drift_frac: 0.60    # first 60% of each user's rows (by time) = pre-drift, rest = post-drift
+  val_frac: 0.15          # last 15% of pre-drift = validation, split by time into calibration | FPR halves
+
+feasibility_users: ["78A91A4E", "86A4F379", "9759096F", "7CE37510", "9DC38D04"]   # UUID prefixes; most post-drift rows
+
+classifier:
+  hidden: [64, 64]        # 158 -> 64 -> 64 -> 30 labels
+  dropout: 0.2
+  lr: 0.001               # Adam
+  weight_decay: 0.0
+  batch_size: 64
+  epochs: 20              # fixed, no early stopping (validation rows are reserved for the detectors)
+  threshold: 0.5          # probability above which a label is predicted positive
+
+drift:
+  columns_prefixes: ["raw_acc:", "proc_gyro:", "raw_magnet:"]   # all phone motion sensors (83 features)
+  magnitudes: [1.0, 2.0, 3.0]   # shift in training standard deviations
+  onset_frac: 0.25              # onset at 25% into the post-drift segment
+  gradual_width: 120            # rows for the gradual ramp from 0 to m

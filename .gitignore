@@ -1,0 +1,21 @@
+# Local-only working notes (not part of the thesis code)
+CLAUDE.md
+DECISIONS.md
+.claude/
+
+# Dataset and caches (download instructions in README.md)
+data/
+
+# Experiment outputs: only curated, final results are committed (git add -f)
+results/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
