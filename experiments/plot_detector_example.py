@@ -44,7 +44,7 @@ def main():
     clf = train_classifier(c.X["train"], c.Y["train"], cfg["classifier"], cfg["seed"])
     ae = train_autoencoder(c.X["train"], cfg["autoencoder"], cfg["seed"])
     cols = drift_columns(features, c, cfg["drift"]["columns_prefixes"])
-    X, Y, onset = make_stream(c, cols, kind, magnitude, cfg["drift"])
+    X, Y, onset = make_stream(c, cols, kind, magnitude, cfg["drift"], cfg["data"]["clip_z"])
     runs = run_detectors(c, X, Y, clf, ae, cfg)
 
     fig, axes = plt.subplots(3, 1, figsize=(10, 9), sharex=True)

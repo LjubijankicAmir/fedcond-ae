@@ -40,7 +40,7 @@ def main():
                "post_clean": f1(c.X["post"][onset:], Y_after)}
         for kind in ("abrupt", "gradual"):
             for m in dcfg["magnitudes"]:
-                X = inject(c.X["post"], cols, onset, m, kind, dcfg["gradual_width"])
+                X = inject(c.X["post"], cols, onset, m, kind, dcfg["gradual_width"], cfg["data"]["clip_z"])
                 rec[f"{kind}_m{m}"] = f1(X[onset:], Y_after)
         rows.append(rec)
 

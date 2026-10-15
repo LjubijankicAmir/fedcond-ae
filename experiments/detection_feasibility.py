@@ -26,6 +26,7 @@ def main():
     clients, features, _ = load_clients(cfg)
     ecfg, dcfg = cfg["detection_feasibility"], cfg["drift"]
     B = cfg["fedcond_test"]["batch_rows"]
+    clip = cfg["data"]["clip_z"]
 
     rows = []
     for prefix in cfg["feasibility_users"]:
@@ -33,7 +34,7 @@ def main():
         clf = train_classifier(c.X["train"], c.Y["train"], cfg["classifier"], cfg["seed"])
         ae = train_autoencoder(c.X["train"], cfg["autoencoder"], cfg["seed"])
         cols = drift_columns(features, c, dcfg["columns_prefixes"])
-        X0, Y0, onset0 = make_stream(c, cols, "abrupt", 0.0, dcfg)  # same stream, no drift
+        X0, Y0, onset0 = make_stream(c, cols, "abrupt", 0.0, dcfg, clip)  # same stream, no drift
         control = {}
         for method in ecfg["threshold_methods"]:
             runs = run_detectors(c, X0, Y0, clf, ae, {**cfg, "alarm": {**cfg["alarm"], "method": method}})
@@ -42,7 +43,7 @@ def main():
 
         for kind in ecfg["kinds"]:
             for m in dcfg["magnitudes"]:
-                X, Y, onset = make_stream(c, cols, kind, m, dcfg)
+                X, Y, onset = make_stream(c, cols, kind, m, dcfg, clip)
                 for method in ecfg["threshold_methods"]:
                     run_cfg = {**cfg, "alarm": {**cfg["alarm"], "method": method}}
                     runs = run_detectors(c, X, Y, clf, ae, run_cfg)

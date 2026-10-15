@@ -33,10 +33,10 @@ def drift_columns(features: list[str], c: Client, prefixes: list[str]) -> np.nda
     return np.flatnonzero(np.array([f.startswith(tuple(prefixes)) for f in features]) & c.observed)
 
 
-def make_stream(c: Client, cols: np.ndarray, kind: str, magnitude: float, dcfg: dict):
+def make_stream(c: Client, cols: np.ndarray, kind: str, magnitude: float, dcfg: dict, clip: float):
     """Return (X, Y, onset): FPR rows + post-drift rows with drift injected; onset is a stream row index."""
     onset_post = onset_row(len(c.X["post"]), dcfg["onset_frac"])
-    X_post = inject(c.X["post"], cols, onset_post, magnitude, kind, dcfg["gradual_width"])
+    X_post = inject(c.X["post"], cols, onset_post, magnitude, kind, dcfg["gradual_width"], clip)
     X = np.vstack([c.X["fpr"], X_post])
     Y = np.vstack([c.Y["fpr"], c.Y["post"]])
     return X, Y, len(c.X["fpr"]) + onset_post

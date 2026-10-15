@@ -5,9 +5,12 @@ One file = one user = one federated client; one row = one minute. Per client:
 1. sort rows by timestamp
 2. keep the same feature columns for every client (drop columns mostly missing across the dataset)
 3. drop rows with too many missing features
-4. split by time: pre-drift (first 60%) | post-drift (last 40%)
-5. inside pre-drift: train | calib | fpr, where calib and fpr are the two time-halves of the last 15%
-6. mean imputation and z-scoring with the client's own training statistics
+4. split by time: pre-drift (first 60% of rows) | post-drift (last 40%)
+5. inside pre-drift, by timestamp: train | calib (one full day) | fpr (the last full day before post-drift)
+6. mean imputation and z-scoring with the client's own training statistics, then clipping to +-clip_z
+
+Clients without enough data for this split (too little training time, or almost no rows recorded in the
+calibration or FPR day) are excluded.
 
 Run as `python -m src.data` to print a per-user summary.
 """
@@ -25,7 +28,7 @@ import pandas as pd
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-CACHE_VERSION = 2  # bump when the Client format or preprocessing code changes
+CACHE_VERSION = 4  # bump when the Client format or preprocessing code changes
 SPLITS = ("train", "calib", "fpr", "post")
 
 
@@ -54,7 +57,13 @@ class Client:
 
     @property
     def days(self) -> float:
-        return (self.t["post"][-1] - self.t["train"][0]) / 86400
+        t = np.concatenate([self.t[s] for s in SPLITS])
+        return (t[-1] - t[0]) / 86400
+
+    @property
+    def train_hours(self) -> float:
+        t = self.t["train"]
+        return (t[-1] - t[0]) / 3600 if len(t) else 0.0
 
 
 def read_raw(raw_dir: Path) -> dict[str, pd.DataFrame]:
@@ -83,22 +92,31 @@ def select_labels(users: dict[str, pd.DataFrame], min_users: int) -> list[str]:
     return [c for c in cols if n_users[c] >= min_users]
 
 
-def split_bounds(n: int, pre_frac: float, val_frac: float) -> dict[str, tuple[int, int]]:
-    """Row ranges [start, end) of each split for a client with n rows."""
-    n_pre = round(n * pre_frac)
-    n_train = n_pre - round(n_pre * val_frac)
-    n_calib_end = n_train + (n_pre - n_train) // 2
-    return {"train": (0, n_train), "calib": (n_train, n_calib_end), "fpr": (n_calib_end, n_pre), "post": (n_pre, n)}
+def split_bounds(t: np.ndarray, pre_frac: float, calib_hours: float, fpr_hours: float) -> dict[str, tuple[int, int]]:
+    """Row ranges [start, end) of each split, given the client's sorted timestamps.
+
+    Pre-drift = the first round(n * pre_frac) rows. Inside it, by time: fpr = rows in the last `fpr_hours`,
+    calib = rows in the `calib_hours` before that, train = everything earlier.
+    """
+    n_pre = round(len(t) * pre_frac)
+    t_pre, end = t[:n_pre], t[n_pre - 1]
+    fpr_start = int(np.searchsorted(t_pre, end - fpr_hours * 3600, side="right"))
+    calib_start = int(np.searchsorted(t_pre, end - (fpr_hours + calib_hours) * 3600, side="right"))
+    return {"train": (0, calib_start), "calib": (calib_start, fpr_start), "fpr": (fpr_start, n_pre),
+            "post": (n_pre, len(t))}
 
 
-def preprocess_user(uuid: str, df: pd.DataFrame, features: list[str], labels: list[str], cfg: dict) -> Client:
+def preprocess_user(uuid: str, df: pd.DataFrame, features: list[str], labels: list[str], cfg: dict) -> Client | None:
+    """Clean, split and scale one user's data; None if no rows survive the missing-value filter."""
     n_raw = len(df)
     df = df[df[features].isna().mean(axis=1) <= cfg["max_row_missing"]].reset_index(drop=True)
+    if df.empty:
+        return None
 
     X = df[features].to_numpy(np.float64)
     Y = df[labels].to_numpy(np.float32)
     t = df["timestamp"].to_numpy()
-    bounds = split_bounds(len(df), cfg["pre_drift_frac"], cfg["val_frac"])
+    bounds = split_bounds(t, cfg["pre_drift_frac"], cfg["calib_hours"], cfg["fpr_hours"])
 
     lo, hi = bounds["train"]
     with warnings.catch_warnings():
@@ -110,6 +128,7 @@ def preprocess_user(uuid: str, df: pd.DataFrame, features: list[str], labels: li
     X = (X - np.nan_to_num(mean)) / std
     X = np.nan_to_num(X, nan=0.0)  # mean imputation: the training mean is 0 after z-scoring
     X[:, unobserved] = 0.0         # no training values -> the column carries no information for this client
+    X = np.clip(X, -cfg["clip_z"], cfg["clip_z"])
 
     sl = {s: slice(*b) for s, b in bounds.items()}
     return Client(
@@ -123,8 +142,23 @@ def preprocess_user(uuid: str, df: pd.DataFrame, features: list[str], labels: li
     )
 
 
-def load_clients(cfg: dict | None = None) -> tuple[dict[str, Client], list[str], list[str]]:
-    """Return (clients by UUID, feature names, label names). Cached in data/processed/."""
+def exclusion_reason(c: Client | None, cfg: dict) -> str | None:
+    """Why a client cannot be used, or None if it can."""
+    if c is None:
+        return "no rows left after the missing-value filter"
+    if c.train_hours < cfg["min_train_hours"]:
+        return f"training data covers only {c.train_hours:.0f} h"
+    for s in ("calib", "fpr"):
+        if len(c.X[s]) < cfg["min_window_rows"]:
+            return f"only {len(c.X[s])} rows in the {s} day"
+    return None
+
+
+def load_all(cfg: dict | None = None) -> tuple[dict[str, Client], dict[str, str], list[str], list[str]]:
+    """Return (usable clients by UUID, {excluded UUID: reason}, feature names, label names).
+
+    Cached in data/processed/, keyed by the data config and CACHE_VERSION.
+    """
     cfg = (cfg or load_config())["data"]
     key = hashlib.sha1(json.dumps([CACHE_VERSION, cfg], sort_keys=True).encode()).hexdigest()[:10]
     cache = ROOT / cfg["processed_dir"] / f"clients_{key}.pkl"
@@ -135,13 +169,24 @@ def load_clients(cfg: dict | None = None) -> tuple[dict[str, Client], list[str],
     users = read_raw(ROOT / cfg["raw_dir"])
     features = select_features(users, cfg["max_col_missing"])
     labels = select_labels(users, cfg["min_label_users"])
-    clients = {u: preprocess_user(u, df, features, labels, cfg) for u, df in users.items()}
-    # Users with every row dropped (e.g. a phone without gyroscope and magnetometer) are excluded.
-    clients = {u: c for u, c in clients.items() if c.n_rows > 0}
+    clients, excluded = {}, {}
+    for u, df in users.items():
+        c = preprocess_user(u, df, features, labels, cfg)
+        reason = exclusion_reason(c, cfg)
+        if reason:
+            excluded[u] = reason
+        else:
+            clients[u] = c
 
     cache.parent.mkdir(parents=True, exist_ok=True)
     with open(cache, "wb") as f:
-        pickle.dump((clients, features, labels), f)
+        pickle.dump((clients, excluded, features, labels), f)
+    return clients, excluded, features, labels
+
+
+def load_clients(cfg: dict | None = None) -> tuple[dict[str, Client], list[str], list[str]]:
+    """Return (usable clients by UUID, feature names, label names)."""
+    clients, _, features, labels = load_all(cfg)
     return clients, features, labels
 
 
@@ -151,7 +196,7 @@ def summary(clients: dict[str, Client]) -> pd.DataFrame:
         labeled = {s: int((~np.isnan(c.Y[s])).any(axis=1).sum()) for s in SPLITS}
         rows.append({
             "uuid": c.uuid, "raw_rows": c.n_raw, "dropped": c.n_dropped, "rows": c.n_rows,
-            "days": round(c.days, 1), "unobserved_cols": c.n_unobserved,
+            "days": round(c.days, 1), "train_hours": round(c.train_hours), "unobserved_cols": c.n_unobserved,
             **{f"n_{s}": len(c.X[s]) for s in SPLITS},
             "labeled_train": labeled["train"], "labeled_post": labeled["post"],
         })
@@ -159,16 +204,17 @@ def summary(clients: dict[str, Client]) -> pd.DataFrame:
 
 
 def main():
-    clients, features, labels = load_clients()
+    clients, excluded, features, labels = load_all()
     df = summary(clients)
     groups = pd.Series([f.split(":")[0] for f in features]).value_counts()
 
     pd.set_option("display.width", 200)
     print(df.assign(uuid=df.uuid.str[:8]).to_string())
-    excluded = sorted(p.name.split(".")[0][:8] for p in (ROOT / load_config()["data"]["raw_dir"]).glob("*.csv.gz")
-                      if p.name.split(".")[0] not in clients)
-    print(f"\nclients: {len(clients)} (excluded, no rows left: {excluded})   rows kept: {df.rows.sum()} / {df.raw_rows.sum()} "
+    print(f"\nclients: {len(clients)}   rows kept: {df.rows.sum()} / {df.raw_rows.sum()} "
           f"({df.dropped.sum()} dropped, {df.dropped.sum() / df.raw_rows.sum():.1%})")
+    print(f"excluded ({len(excluded)}):")
+    for u, reason in sorted(excluded.items()):
+        print(f"  {u[:8]}: {reason}")
     print(f"features: {len(features)}  ->  {groups.to_dict()}")
     print(f"labels ({len(labels)}): {[l.removeprefix('label:') for l in labels]}")
     print(f"days covered: {df.days.min()}-{df.days.max()} (median {df.days.median()})")

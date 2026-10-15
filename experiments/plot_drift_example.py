@@ -42,7 +42,7 @@ def main():
 
     fig, axes = plt.subplots(2, 1, figsize=(9, 5.5), sharex=True, sharey=True)
     for ax, kind in zip(axes, ("abrupt", "gradual")):
-        drifted = inject(X, cols, onset, m, kind, dcfg["gradual_width"])[lo:hi, j]
+        drifted = inject(X, cols, onset, m, kind, dcfg["gradual_width"], cfg["data"]["clip_z"])[lo:hi, j]
         clean = X[lo:hi, j]
         for y, color, label in ((drifted, DRIFTED, f"drifted (+{m:g})"), (clean, CLEAN, "clean")):
             ax.plot(x, y, color=color, lw=0.6, alpha=0.45)
