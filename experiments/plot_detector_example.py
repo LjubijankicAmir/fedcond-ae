@@ -2,7 +2,7 @@
 
 One panel per detector, sharing the time axis (rows = minutes, 0 = drift onset). Each panel shows the
 detector's score, its alarm threshold (label-free detectors only), the alarms it raised, and its detection
-lag and false-alarm count. Everything left of the onset is clean data, so alarms there are false alarms.
+lag and false-alarm rate per 30-minute round (see src/evaluation.py). Everything left of the onset is clean data, so alarms there are false alarms.
 
 Usage: python -m experiments.plot_detector_example [USER_PREFIX] [abrupt|gradual] [MAGNITUDE]
 """
@@ -18,7 +18,7 @@ from matplotlib.patches import Patch
 
 from src.data import load_clients, load_config
 from src.detectors import train_autoencoder
-from src.evaluation import drift_columns, lag_and_false_alarms, make_stream, run_detectors
+from src.evaluation import drift_columns, evaluate_run, make_stream, run_detectors
 from src.models import train_classifier
 from src.utils import result_stem, set_seed
 
@@ -66,11 +66,10 @@ def main():
                 ax.set_yscale("log")
         ax.axvline(0, color=INK, lw=1.2, ls="--")
 
-        lag, n_false = lag_and_false_alarms(run, onset)
-        lag_txt = "never" if np.isnan(lag) else f"after {lag:.0f} min"
-        unit = "rounds" if name == "fedcond" else "minutes"
-        n_clean = int((run.score_rows < onset).sum())
-        ax.set_title(f"{title}   ·   drift detected: {lag_txt}   ·   false alarms: {n_false} in {n_clean} clean {unit}",
+        res = evaluate_run(run, onset, len(c.X["fpr"]), len(X), cfg["fedcond_test"]["batch_rows"])
+        lag_txt = "never" if np.isnan(res["lag"]) else f"after {res['lag']:.0f} min"
+        ax.set_title(f"{title}   ·   drift detected: {lag_txt}   ·   "
+                     f"false alarms: {res['fa_all']:.0%} of {res['clean_rounds']} clean rounds",
                      loc="left", fontsize=10.5, color=INK)
         ax.set_ylabel(ylabel, color=MUTED, fontsize=9)
         ax.grid(axis="y", color=GRID, lw=0.8)

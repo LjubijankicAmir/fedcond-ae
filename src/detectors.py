@@ -107,11 +107,18 @@ class ThresholdAlarm:
             raise ValueError(f"unknown threshold method: {cfg['method']}")
         return cls(float(threshold), cfg["confirm"])
 
-    def alarms(self, scores: np.ndarray) -> np.ndarray:
-        """Row indices where an alarm fires: the `confirm`-th consecutive row above threshold (one per run)."""
-        out, run = [], 0
+    def _runs(self, scores: np.ndarray) -> np.ndarray:
+        """Length of the current run of consecutive above-threshold rows, per row."""
+        runs, run = np.zeros(len(scores), dtype=int), 0
         for i, above in enumerate(scores > self.threshold):
             run = run + 1 if above else 0
-            if run == self.confirm:
-                out.append(i)
-        return np.array(out, dtype=int)
+            runs[i] = run
+        return runs
+
+    def alarms(self, scores: np.ndarray) -> np.ndarray:
+        """Row indices where an alarm starts: the `confirm`-th consecutive row above threshold (one per run)."""
+        return np.flatnonzero(self._runs(scores) == self.confirm)
+
+    def alarm_state(self, scores: np.ndarray) -> np.ndarray:
+        """Row indices that are in alarm: at least `confirm` consecutive rows above threshold up to that row."""
+        return np.flatnonzero(self._runs(scores) >= self.confirm)

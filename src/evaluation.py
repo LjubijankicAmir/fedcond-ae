@@ -24,7 +24,8 @@ class DetectorRun:
     scores: np.ndarray      # per row (autoencoder, entropy) or per round (fedcond)
     score_rows: np.ndarray  # stream row of each score; for rounds, the round's last row
     threshold: float        # NaN for fedcond (its test has no fixed threshold)
-    alarm_rows: np.ndarray  # stream rows where an alarm fired
+    alarm_rows: np.ndarray  # stream rows where an alarm starts (for plotting)
+    state_rows: np.ndarray  # stream rows in alarm state; a round with any of them answers "drift"
 
 
 def drift_columns(features: list[str], c: Client, prefixes: list[str]) -> np.ndarray:
@@ -52,7 +53,7 @@ def run_detectors(c: Client, X: np.ndarray, Y: np.ndarray, clf, ae, cfg: dict) -
                         ("entropy", lambda Z: prediction_entropy(predict_proba(clf, Z)))):
         alarm = ThresholdAlarm.calibrate(score(c.X["calib"]), cfg["alarm"])
         s = score(X)
-        runs[name] = DetectorRun(s, rows, alarm.threshold, alarm.alarms(s))
+        runs[name] = DetectorRun(s, rows, alarm.threshold, alarm.alarms(s), alarm.alarm_state(s))
 
     fcfg, thr = cfg["fedcond_test"], cfg["classifier"]["threshold"]
     test = FedConDTest(fcfg["queue_size"], fcfg["alpha"])
@@ -64,12 +65,38 @@ def run_detectors(c: Client, X: np.ndarray, Y: np.ndarray, clf, ae, cfg: dict) -
     s = np.array([macro_f1(Y[r], P[r], thr) for r in rounds])
     ends = np.array([r.stop - 1 for r in rounds])
     flags = np.array([test.update(v) for v in s], dtype=bool)
-    runs["fedcond"] = DetectorRun(s, ends, float("nan"), ends[flags])
+    runs["fedcond"] = DetectorRun(s, ends, float("nan"), ends[flags], ends[flags])
     return runs
 
 
-def lag_and_false_alarms(run: DetectorRun, onset: int) -> tuple[float, int]:
-    """(rows from onset to the first alarm at or after it, or NaN if none; number of alarms before onset)."""
-    after = run.alarm_rows[run.alarm_rows >= onset]
-    lag = float(after[0] - onset) if len(after) else float("nan")
-    return lag, int((run.alarm_rows < onset).sum())
+def evaluate_run(run: DetectorRun, onset: int, n_fpr: int, n_rows: int, round_rows: int) -> dict:
+    """Detection lag and false-alarm rates of one detector run, on a common per-round scale.
+
+    The stream is cut into consecutive rounds of `round_rows` rows. In every round each detector answers
+    "drift: yes/no": yes if any of its alarm-state rows falls in the round. The answer takes effect at the
+    round's end, as in the federated loop.
+    - lag: end of the round of the first alarm-state row at or after onset, minus onset (rows); NaN if never.
+    - fa_*: share of fully clean rounds (ending before onset) answered "yes"; split into rounds inside the
+      FPR rows, rounds in the clean part of the post-drift segment, and all clean rounds.
+    """
+    after = run.state_rows[run.state_rows >= onset]
+    lag = float((after[0] // round_rows + 1) * round_rows - 1 - onset) if len(after) else float("nan")
+
+    n_rounds = n_rows // round_rows
+    starts = np.arange(n_rounds) * round_rows
+    ends = starts + round_rows - 1
+    flagged = np.zeros(n_rounds, dtype=bool)
+    idx = np.unique(run.state_rows // round_rows)
+    flagged[idx[idx < n_rounds]] = True
+
+    def rate(mask):
+        return float(flagged[mask].mean()) if mask.any() else float("nan")
+
+    clean = ends < onset
+    return {
+        "lag": lag,
+        "fa_fpr": rate(clean & (ends < n_fpr)),
+        "fa_post": rate(clean & (starts >= n_fpr)),
+        "fa_all": rate(clean),
+        "clean_rounds": int(clean.sum()),
+    }
