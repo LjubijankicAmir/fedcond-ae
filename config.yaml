@@ -42,3 +42,7 @@ fedcond_test:
   queue_size: 20
   alpha: 0.05
   batch_rows: 30          # B new rows per round
+
+detection_feasibility:
+  kinds: [abrupt, gradual]
+  threshold_methods: [std, quantile]   # see alarm: (k, quantile)
