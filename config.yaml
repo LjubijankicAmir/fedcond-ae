@@ -50,3 +50,16 @@ fedcond_test:
 detection_feasibility:
   kinds: [abrupt, gradual]
   threshold_methods: [std, quantile]   # see alarm: (k, quantile)
+
+federated:
+  n_clients: 10           # usable clients with the most post-drift rows
+  n_drifted: 2            # drifted clients per seed, drawn at random from the 10
+  seeds: [0, 1, 2]
+  kind: abrupt
+  magnitude: 2.0          # detectable by every detector in step 5
+  concurrency: 0.2        # gamma: share of clients training at the same time
+  local_epochs: 2
+  lambda_base: 0.1        # placeholder, to be tuned
+  lambda_step: 0.2        # added to the client's lambda each time its trigger fires
+  warmup_rounds: 20       # synchronous FedAvg rounds on the training rows before streaming starts
+  triggers: [none, fedcond, autoencoder, oracle]
