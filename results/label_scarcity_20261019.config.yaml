@@ -1,0 +1,107 @@
+seed: 42
+data:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  max_col_missing: 0.2
+  max_row_missing: 0.3
+  min_label_users: 30
+  pre_drift_frac: 0.6
+  calib_hours: 24
+  fpr_hours: 24
+  min_train_hours: 24
+  min_window_rows: 120
+  clip_z: 5.0
+  paper_train_frac: 0.6
+  paper_val_frac: 0.2
+  paper_split_seed: 0
+feasibility_users:
+- 78A91A4E
+- 86A4F379
+- 9759096F
+- 7CE37510
+- 9DC38D04
+classifier:
+  hidden:
+  - 64
+  - 64
+  dropout: 0.2
+  lr: 0.001
+  weight_decay: 0.0
+  batch_size: 64
+  epochs: 20
+  threshold: 0.5
+drift:
+  columns_prefixes:
+  - 'raw_acc:'
+  - 'proc_gyro:'
+  - 'raw_magnet:'
+  magnitudes:
+  - 1.0
+  - 2.0
+  - 3.0
+  onset_frac: 0.25
+  gradual_width: 120
+autoencoder:
+  hidden:
+  - 64
+  - 32
+  lr: 0.001
+  batch_size: 64
+  epochs: 30
+alarm:
+  method: std
+  k: 3.0
+  quantile: 0.99
+  confirm: 3
+fedcond_test:
+  queue_size: 20
+  alpha: 0.05
+  batch_rows: 30
+detection_feasibility:
+  kinds:
+  - abrupt
+  - gradual
+  threshold_methods:
+  - std
+  - quantile
+federated:
+  n_clients: 10
+  n_drifted: 2
+  seeds:
+  - 0
+  - 1
+  - 2
+  kind: abrupt
+  magnitude: 2.0
+  concurrency: 0.2
+  local_epochs: 2
+  lambda_base: 0.1
+  lambda_step: 0.2
+  warmup_rounds: 20
+  methods:
+  - none
+  - fedcond
+  - fedcond_ae
+  - oracle
+paper_setup:
+  schemes:
+  - paper_time
+  - paper_random
+  initial_frac: 0.3
+  seeds:
+  - 0
+  - 1
+  - 2
+  methods:
+  - fedavg
+  - fedprox
+  - fedcond
+  - fedcond_ae
+  fedprox_mu: 0.1
+  label_rates:
+  - 1.0
+  - 0.5
+  - 0.1
+  - 0.05
+  - 0.0
+  label_scheme: paper_time
