@@ -32,7 +32,7 @@ def main():
     set_seed(cfg["seed"])
     clients, features, _ = load_clients(cfg)
     users = cfg["feasibility_users"] if args.feasibility_users else sorted(u[:8] for u in clients)
-    name = "detection_feasibility" if args.feasibility_users else "detection_race"
+    out_name = "detection_feasibility" if args.feasibility_users else "detection_race"
     ecfg, dcfg = cfg["detection_race"], cfg["drift"]
     B = cfg["fedcond_test"]["batch_rows"]
     clip = cfg["data"]["clip_z"]
@@ -64,7 +64,7 @@ def main():
         print(f"done {prefix}")
 
     df = pd.DataFrame(rows)
-    path = save_results(df, name, cfg)
+    path = save_results(df, out_name, cfg)
 
     df["detected"] = df.lag.notna()
     df["real"] = df.detected & ((df.lag < df.control_lag) | df.control_lag.isna())
@@ -73,7 +73,7 @@ def main():
                       real=("real", "sum"), fa_fpr=("fa_fpr", "mean"),
                       fa_post=("fa_post", "mean"), fa_all=("fa_all", "mean"))
                  .reset_index())
-    save_results(summary, name + "_summary", cfg)
+    save_results(summary, out_name + "_summary", cfg)
     pd.set_option("display.width", 200)
     print(summary.round(3).to_string(index=False))
     print(f"\n(detected / real = number of users out of {len(users)})")
