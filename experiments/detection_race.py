@@ -1,6 +1,6 @@
-"""Feasibility step 5: race the drift detectors.
+"""Detection race (H1, H2): the drift alarms on every usable user.
 
-For each test user x drift type x magnitude x threshold method, run the autoencoder, entropy and FedConD
+For each user x drift type x magnitude x threshold method, run the autoencoder, entropy and FedConD
 detectors on the user's stream and record detection lag and false-alarm rates (see src/evaluation.py).
 
 Control: each detector is also run on the same stream without drift. Its "lag" there (control_lag) is when
@@ -9,7 +9,11 @@ or detected while the control never fires).
 
 The classifier and autoencoder are trained once per user on the clean training rows. FedConD's result does
 not depend on the threshold method; it is repeated in both for easy comparison.
+
+Usage: python -m experiments.detection_race [--feasibility-users]   (the 5 feasibility users only, quick)
 """
+import argparse
+
 import numpy as np
 import pandas as pd
 
@@ -21,15 +25,20 @@ from src.utils import save_results, set_seed
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--feasibility-users", action="store_true")
+    args = parser.parse_args()
     cfg = load_config()
     set_seed(cfg["seed"])
     clients, features, _ = load_clients(cfg)
-    ecfg, dcfg = cfg["detection_feasibility"], cfg["drift"]
+    users = cfg["feasibility_users"] if args.feasibility_users else sorted(u[:8] for u in clients)
+    name = "detection_feasibility" if args.feasibility_users else "detection_race"
+    ecfg, dcfg = cfg["detection_race"], cfg["drift"]
     B = cfg["fedcond_test"]["batch_rows"]
     clip = cfg["data"]["clip_z"]
 
     rows = []
-    for prefix in cfg["feasibility_users"]:
+    for prefix in users:
         c = next(c for u, c in clients.items() if u.startswith(prefix))
         clf = train_classifier(c.X["train"], c.Y["train"], cfg["classifier"], cfg["seed"])
         ae = train_autoencoder(c.X["train"], cfg["autoencoder"], cfg["seed"])
@@ -55,7 +64,7 @@ def main():
         print(f"done {prefix}")
 
     df = pd.DataFrame(rows)
-    path = save_results(df, "detection_feasibility", cfg)
+    path = save_results(df, name, cfg)
 
     df["detected"] = df.lag.notna()
     df["real"] = df.detected & ((df.lag < df.control_lag) | df.control_lag.isna())
@@ -64,10 +73,10 @@ def main():
                       real=("real", "sum"), fa_fpr=("fa_fpr", "mean"),
                       fa_post=("fa_post", "mean"), fa_all=("fa_all", "mean"))
                  .reset_index())
-    save_results(summary, "detection_feasibility_summary", cfg)
+    save_results(summary, name + "_summary", cfg)
     pd.set_option("display.width", 200)
     print(summary.round(3).to_string(index=False))
-    print(f"\n(detected / real = number of users out of {len(cfg['feasibility_users'])})")
+    print(f"\n(detected / real = number of users out of {len(users)})")
     print(f"saved {path}")
 
 
