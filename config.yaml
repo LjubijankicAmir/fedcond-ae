@@ -12,6 +12,9 @@ data:
   min_train_hours: 24     # exclude clients with less training time than this
   min_window_rows: 120    # exclude clients with fewer rows than this in the calibration or FPR day
   clip_z: 5.0             # cap z-scored values at +-clip_z (a few near-constant features reach |z| > 1000)
+  paper_train_frac: 0.6   # "paper" split schemes (experiment 1): per-client train/val/test = 60/20/20
+  paper_val_frac: 0.2
+  paper_split_seed: 0     # fixed random split for "paper_random" (same split in every repetition)
 
 feasibility_users: ["78A91A4E", "86A4F379", "9759096F", "7CE37510", "9DC38D04"]   # UUID prefixes; most post-drift rows
 
@@ -47,19 +50,54 @@ fedcond_test:
   alpha: 0.05
   batch_rows: 30          # B new rows per round
 
-detection_feasibility:
+detection_race:           # H1 / H2: the drift alarms on every usable user
   kinds: [abrupt, gradual]
   threshold_methods: [std, quantile]   # see alarm: (k, quantile)
 
-federated:
-  n_clients: 10           # usable clients with the most post-drift rows
-  n_drifted: 2            # drifted clients per seed, drawn at random from the 10
-  seeds: [0, 1, 2]
-  kind: abrupt
-  magnitude: 2.0          # detectable by every detector in step 5
+federated:                # shared by every federated experiment (src/fedcond.py)
+  kind: abrupt            # default drift kind / magnitude for drifted clients (experiments override these)
+  magnitude: 2.0
   concurrency: 0.2        # gamma: share of clients training at the same time
   local_epochs: 2
-  lambda_base: 0.1        # placeholder, to be tuned
-  lambda_step: 0.2        # added to the client's lambda each time its trigger fires
-  warmup_rounds: 20       # synchronous FedAvg rounds on the training rows before streaming starts
-  triggers: [none, fedcond, autoencoder, oracle]
+  lambda_base: 0.1        # FedConD's base lambda (tuned on validation: lambda_tuning, 0.1 was best)
+  lambda_step: 0.2        # added to the client's lambda each time its trigger fires (paper: 0.1-0.3)
+  warmup_rounds: 20       # synchronous FedAvg rounds (lambda = 0) on the rows available at the start
+  recenter_window: 1440   # label-free reaction: rows (one day) on each side of the alarm to estimate the shift
+  recenter_min_rows: 120  # rows since the alarm needed before the correction is applied
+
+reaction_test:            # oracle trigger with different reactions (drift scheme, scarce labels)
+  n_drifted: 5            # ~10% of the 45 usable clients
+  seeds: [0, 1, 2]
+  kind: abrupt
+  magnitude: 2.0
+  label_rate: 0.05        # stream rows keeping their labels after the fully labeled training rows
+  methods: [none, oracle, oracle_recenter]   # no reaction / FedConD's reaction / re-centering
+
+paper_setup:              # experiment 1 (paper_comparison): close to the FedConD paper's ExtraSensory setup
+  schemes: [paper_time, paper_random]   # per-client 60/20/20 split by time or at random (see data:)
+  initial_frac: 0.3       # share of each client's training rows available at the start; the rest streams in
+  seeds: [0, 1, 2]
+  methods: [fedavg, fedprox, fedcond, fedcond_ae]
+  fedprox_mu: 0.1         # FedProx's fixed proximal weight (tuned on validation: lambda_tuning, flat in 0.1-4)
+  label_rates: [1.0, 0.5, 0.1, 0.05, 0.0]   # experiment 4: share of stream rows that keep their labels
+  label_scheme: paper_time                  # experiment 4 runs on the time-ordered split
+
+natural_drift_check:      # is there natural (not injected) drift, and does the autoencoder see it?
+  seeds: [0, 1, 2]
+  min_day_rows: 60        # a day with fewer rows is skipped
+  min_day_labeled: 30     # a day with fewer labeled rows gets no F1 / BCE (its label-free stats are kept)
+  min_post_days: 2        # clients with fewer usable post-drift days are skipped
+
+lambda_tuning:            # FedProx mu and FedConD base lambda on the paper_time validation rows (no drift, all labels)
+  grid: [0.1, 0.5, 1.0, 2.0, 4.0]
+  methods: [fedprox, fedcond]
+  seeds: [0, 1, 2]
+
+main_comparison:          # R5 / H3: injected drift + label scarcity, all methods
+  n_drifted: 5            # ~10% of the 45 usable clients
+  seeds: [0, 1, 2, 3, 4]  # 5 drifted clients per seed -> 25 drifted (client, seed) pairs per cell
+  kinds: [abrupt, gradual]
+  magnitude: 2.0
+  label_rates: [1.0, 0.05, 0.0]
+  methods: [fedavg, fedprox, fedcond, fedcond_ae, fedcond_ae_leash, fedcond_ae_recenter, oracle_recenter]
+  sensitivity: [fedcond_step01]   # FedConD with lambda_step 0.1 (the paper's smallest), first kind only

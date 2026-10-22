@@ -12,6 +12,10 @@ One file = one user = one federated client; one row = one minute. Per client:
 Clients without enough data for this split (too little training time, or almost no rows recorded in the
 calibration or FPR day) are excluded.
 
+Alternative "paper" schemes (experiment 1, close to the FedConD paper): per client 60/20/20 train/val/test,
+either by time ("paper_time") or random ("paper_random", each part kept in time order). Steps 1-3 and 6 are the
+same; only clients without any usable rows are excluded.
+
 Run as `python -m src.data` to print a per-user summary.
 """
 from __future__ import annotations
@@ -28,8 +32,9 @@ import pandas as pd
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-CACHE_VERSION = 4  # bump when the Client format or preprocessing code changes
-SPLITS = ("train", "calib", "fpr", "post")
+CACHE_VERSION = 5  # bump when the Client format or preprocessing code changes
+SPLITS = ("train", "calib", "fpr", "post")  # splits of the default "drift" scheme
+SCHEMES = ("drift", "paper_time", "paper_random")
 
 
 def load_config(path: Path = ROOT / "config.yaml") -> dict:
@@ -57,8 +62,8 @@ class Client:
 
     @property
     def days(self) -> float:
-        t = np.concatenate([self.t[s] for s in SPLITS])
-        return (t[-1] - t[0]) / 86400
+        t = np.concatenate(list(self.t.values()))
+        return (t.max() - t.min()) / 86400
 
     @property
     def train_hours(self) -> float:
@@ -106,7 +111,21 @@ def split_bounds(t: np.ndarray, pre_frac: float, calib_hours: float, fpr_hours: 
             "post": (n_pre, len(t))}
 
 
-def preprocess_user(uuid: str, df: pd.DataFrame, features: list[str], labels: list[str], cfg: dict) -> Client | None:
+def paper_split(n: int, scheme: str, cfg: dict) -> dict[str, np.ndarray]:
+    """Row indices of a per-client train/val/test split (60/20/20 by default), each part in time order."""
+    if scheme == "paper_time":
+        idx = np.arange(n)
+    elif scheme == "paper_random":
+        idx = np.random.default_rng(cfg["paper_split_seed"]).permutation(n)
+    else:
+        raise ValueError(f"unknown split scheme: {scheme}")
+    a = round(n * cfg["paper_train_frac"])
+    b = a + round(n * cfg["paper_val_frac"])
+    return {"train": np.sort(idx[:a]), "val": np.sort(idx[a:b]), "test": np.sort(idx[b:])}
+
+
+def preprocess_user(uuid: str, df: pd.DataFrame, features: list[str], labels: list[str], cfg: dict,
+                    scheme: str = "drift") -> Client | None:
     """Clean, split and scale one user's data; None if no rows survive the missing-value filter."""
     n_raw = len(df)
     df = df[df[features].isna().mean(axis=1) <= cfg["max_row_missing"]].reset_index(drop=True)
@@ -116,13 +135,16 @@ def preprocess_user(uuid: str, df: pd.DataFrame, features: list[str], labels: li
     X = df[features].to_numpy(np.float64)
     Y = df[labels].to_numpy(np.float32)
     t = df["timestamp"].to_numpy()
-    bounds = split_bounds(t, cfg["pre_drift_frac"], cfg["calib_hours"], cfg["fpr_hours"])
+    if scheme == "drift":
+        bounds = split_bounds(t, cfg["pre_drift_frac"], cfg["calib_hours"], cfg["fpr_hours"])
+        idx = {s: np.arange(*b) for s, b in bounds.items()}
+    else:
+        idx = paper_split(len(df), scheme, cfg)
 
-    lo, hi = bounds["train"]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN columns, handled below
-        mean = np.nanmean(X[lo:hi], axis=0)
-        std = np.nanstd(X[lo:hi], axis=0)
+        mean = np.nanmean(X[idx["train"]], axis=0)
+        std = np.nanstd(X[idx["train"]], axis=0)
     unobserved = np.isnan(mean)
     std = np.where(np.isnan(std) | (std < 1e-8), 1.0, std)
     X = (X - np.nan_to_num(mean)) / std
@@ -130,22 +152,23 @@ def preprocess_user(uuid: str, df: pd.DataFrame, features: list[str], labels: li
     X[:, unobserved] = 0.0         # no training values -> the column carries no information for this client
     X = np.clip(X, -cfg["clip_z"], cfg["clip_z"])
 
-    sl = {s: slice(*b) for s, b in bounds.items()}
     return Client(
         uuid=uuid,
-        X={s: X[sl[s]].astype(np.float32) for s in SPLITS},
-        Y={s: Y[sl[s]] for s in SPLITS},
-        t={s: t[sl[s]] for s in SPLITS},
+        X={s: X[i].astype(np.float32) for s, i in idx.items()},
+        Y={s: Y[i] for s, i in idx.items()},
+        t={s: t[i] for s, i in idx.items()},
         n_raw=n_raw,
         n_dropped=n_raw - len(df),
         observed=~unobserved,
     )
 
 
-def exclusion_reason(c: Client | None, cfg: dict) -> str | None:
+def exclusion_reason(c: Client | None, cfg: dict, scheme: str = "drift") -> str | None:
     """Why a client cannot be used, or None if it can."""
     if c is None:
         return "no rows left after the missing-value filter"
+    if scheme != "drift":
+        return None
     if c.train_hours < cfg["min_train_hours"]:
         return f"training data covers only {c.train_hours:.0f} h"
     for s in ("calib", "fpr"):
@@ -154,13 +177,14 @@ def exclusion_reason(c: Client | None, cfg: dict) -> str | None:
     return None
 
 
-def load_all(cfg: dict | None = None) -> tuple[dict[str, Client], dict[str, str], list[str], list[str]]:
+def load_all(cfg: dict | None = None, scheme: str = "drift"
+             ) -> tuple[dict[str, Client], dict[str, str], list[str], list[str]]:
     """Return (usable clients by UUID, {excluded UUID: reason}, feature names, label names).
 
-    Cached in data/processed/, keyed by the data config and CACHE_VERSION.
+    Cached in data/processed/, keyed by the data config, the split scheme and CACHE_VERSION.
     """
     cfg = (cfg or load_config())["data"]
-    key = hashlib.sha1(json.dumps([CACHE_VERSION, cfg], sort_keys=True).encode()).hexdigest()[:10]
+    key = hashlib.sha1(json.dumps([CACHE_VERSION, scheme, cfg], sort_keys=True).encode()).hexdigest()[:10]
     cache = ROOT / cfg["processed_dir"] / f"clients_{key}.pkl"
     if cache.exists():
         with open(cache, "rb") as f:
@@ -171,8 +195,8 @@ def load_all(cfg: dict | None = None) -> tuple[dict[str, Client], dict[str, str]
     labels = select_labels(users, cfg["min_label_users"])
     clients, excluded = {}, {}
     for u, df in users.items():
-        c = preprocess_user(u, df, features, labels, cfg)
-        reason = exclusion_reason(c, cfg)
+        c = preprocess_user(u, df, features, labels, cfg, scheme)
+        reason = exclusion_reason(c, cfg, scheme)
         if reason:
             excluded[u] = reason
         else:
@@ -184,9 +208,9 @@ def load_all(cfg: dict | None = None) -> tuple[dict[str, Client], dict[str, str]
     return clients, excluded, features, labels
 
 
-def load_clients(cfg: dict | None = None) -> tuple[dict[str, Client], list[str], list[str]]:
+def load_clients(cfg: dict | None = None, scheme: str = "drift") -> tuple[dict[str, Client], list[str], list[str]]:
     """Return (usable clients by UUID, feature names, label names)."""
-    clients, _, features, labels = load_all(cfg)
+    clients, _, features, labels = load_all(cfg, scheme)
     return clients, features, labels
 
 
